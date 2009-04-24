@@ -1,4 +1,4 @@
---Silo Model Tools v0.5
+--Silo Model Tools v0.55
 --by Jim Holmes (jim@32bitkid.com)
 --
 --Import SILO geometry from Silo's Native Format (.sia) 
@@ -6,10 +6,30 @@
 --v0.1: Inital Version
 --v0.2: Bug Fix for multuple objects
 --v0.5: Import/Export
+--v0.55: Import Creases (Buggy Export Creases commented out)
 
 utility rolloutSiloImporter "Silo Importer" width:162 height:93
 (
+
+fn findEdge tmesh edge = (
+	seta = polyOp.getEdgesUsingVert tmesh ((edge.x as integer) + 2)
+	setb = polyOp.getEdgesUsingVert tmesh ((edge.y as integer) + 2)
+
+
+	eval = -1
+	
+	for i =  1 to seta.count do (
+		if seta[i] and setb[i] do (
+			eval = i
+		)
+	)	
+	
+	return (eval)
+)
+
 fn exportSIAMesh tmesh = (
+	
+
 	if(classOf(tmesh) != Editable_Poly) do
    	(
 		messageBox("Object must be a Editable Poly.")
@@ -20,18 +40,27 @@ fn exportSIAMesh tmesh = (
 	
 	if fileName == undefined then return false
 	
+	crease_array = #()
+	
 	out_file = createfile fileName
 	
 	format "-version1.0\n" to:out_file
-
+	
 	format "-Mat \n" to:out_file
 	if tmesh.material != undefined then (
-		format "-dif % % % 1\n" (tmesh.material.diffuse.red/255) (tmesh.material.diffuse.green/255) (tmesh.material.diffuse.blue/255) to:out_file
-		format "-amb % % % 1\n" (tmesh.material.selfillumination/100) (tmesh.material.selfillumination/100) (tmesh.material.selfillumination/100) to:out_file
+		if (tmesh.material.diffuseMap != undefined) then (
+			format "-tex \"%\"\n" tmesh.material.diffuseMap.filename to:out_file
+			format "-dif 1 1 1 1\n" to:out_file
+			format "-amb 1 1 1 1\n" to:out_file
+		) else (
+			format "-dif % % % 1\n" (tmesh.material.diffuse.red/255) (tmesh.material.diffuse.green/255) (tmesh.material.diffuse.blue/255) to:out_file
+			format "-amb % % % 1\n" (tmesh.material.selfillumination/100) (tmesh.material.selfillumination/100) (tmesh.material.selfillumination/100) to:out_file
+		)
+		
 		format "-spec 0 0 0 0\n" to:out_file
 		format "-emis 0 0 0 0\n" to:out_file
 		format "-shin %\n" (tmesh.material.specularLevel) to:out_file
-		if (tmesh.material.diffuseMap != undefined) then format "-tex \"%\"\n" tmesh.material.diffuseMap.filename to:out_file
+		
 	) else (
 		format "-dif 0.95 0.95 0.95 1\n" to:out_file
 		format "-amb 0.95 0.95 0.95 1\n" to:out_file
@@ -50,9 +79,24 @@ fn exportSIAMesh tmesh = (
 		format "-vert % % %\n" temp[1] temp[3] -temp[2]  to:out_file
 	)
 	for i = 1 to polyOp.getNumEdges tmesh do (
+		tmesh.EditablePoly.SetSelection #Edge #{i}
+		crease = tmesh.EditablePoly.getEdgeData 1 0 false
+		if (crease > 0) then (append crease_array (i-1))
+	
 		temp = polyOp.getEdgeVerts tmesh i
 		format "-edge % %\n" (temp[1]-1) (temp[2]-1) to:out_file
 	)
+	
+	/* buggy
+	if (crease_array.count > 0) then (
+		format "-creas " to:out_file
+		for i = 1 to crease_array.count do (
+			format "% " crease_array[i] to:out_file
+		)		
+		format "\n" to:out_file
+	)
+	*/
+	
 	format "-setmat 0\n" to:out_file
 	for i = 1 to polyOp.getNumFaces tmesh do (
 		temp = polyOp.getFaceVerts tmesh i
@@ -87,7 +131,7 @@ fn ImportSIAMesh = (
 	
 	version = readLine in_file
 	
-	disableSceneRedraw() 
+	--disableSceneRedraw() 
 	
 	Undo off ( 
 	
@@ -142,6 +186,11 @@ fn ImportSIAMesh = (
 				face_count = 0
 				uvw_count = 0
 				
+				ms = null
+				
+				do_crease = false
+				crease_info = stringStream("")
+				
 				
 				while (cmd != "-endShape") do (
 					data = stringStream(raw = readLine in_file)
@@ -185,13 +234,12 @@ fn ImportSIAMesh = (
 						
 					)
 
-					if cmd == "-subl" do (
+					if cmd == "-subl" then (
 						local i = (readDelimitedString data " ") as integer
 						ms = MeshSmooth()
 						ms.useRenderIterations = true
 						ms.renderIterations = i
-						ms.Iterations = 0
-						addModifier mymesh ms
+						ms.Iterations = 1
 					)
 					
 					if cmd == "-axis" do (
@@ -205,8 +253,42 @@ fn ImportSIAMesh = (
 						local i = (readDelimitedString data " ") as integer
 						mymesh.material = material_array[i+1]
 					)
+					
+					if cmd == "-creas" do (
+						do_crease = true
+						crease_info = data
+					)
 				)
 				/* Clean up */
+				
+				--Process Creases
+				if do_crease then (
+					local cmd = (readDelimitedString crease_info " ") as string
+					
+					while (eof crease_info == false) do (
+						local i = (readDelimitedString crease_info " ") as integer
+						local j = findEdge mymesh edge_array[i+1]
+						if j != -1 then (
+							mymesh.EditablePoly.SetSelection #Edge #{j}
+							mymesh.EditablePoly.setEdgeData 1 1
+						)
+					)
+					
+				)
+				
+				--Smooth
+				if ms == undefined then (
+					if do_crease then (
+						ms = MeshSmooth()
+						ms.Iterations = 1
+					) else (
+						ms = Smooth()
+						ms.autosmooth = true
+					)
+				)				
+				
+				addModifier mymesh ms
+
 				mymesh.deleteIsoVerts()
 				append mesh_array mymesh
 			)
@@ -233,7 +315,7 @@ fn ImportSIAMesh = (
 	/* Close File */
 	close in_file
 	
-	enableSceneRedraw()
+	--enableSceneRedraw()
 	
 )
 	label lbl1 "SILO Model Tools v0.5" pos:[24,13] width:132 height:16
